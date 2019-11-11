@@ -1,0 +1,513 @@
+﻿
+
+namespace Console
+{
+    public class SchedulerTaskBLL
+    {
+        public ApiResult DeleteByTaskID(string taskids)
+        {
+            string[] idlist = taskids.Split(new string[] { "," }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (string id in idlist)
+            {
+                int ID = Convert.ToInt32(id);
+                dbcontext.SchedulerTasks.Remove(dbcontext.SchedulerTasks.FirstOrDefault(t => t.ID == ID));
+
+            }
+            dbcontext.SaveChanges();
+            return ApiResult.NewSuccessJson("删除成功");
+        }
+
+        public ApiResult AddUserBackDBTask(string dbid, string username)
+        {
+            EKUDbcontext dbcontext = new EKUDbcontext();
+            DB db = dbcontext.DBs.FirstOrDefault(t => t.ID == dbid);
+            if (db != null)
+            {
+                DateTime now = DateTime.Now;
+                SchedulerTask task = dbcontext.SchedulerTasks.FirstOrDefault(t => t.DBID == dbid && t.HandlerName == "BackDB");
+                if (task != null)
+                {
+                    task.Scheduler = "freq=daily;interval=1;runtime=01:00";
+                    task.IsDisabled = false;
+                    task.StartDate = now;
+                    task.LastRunning = null;
+                    task.NextRunning = new DateTime(now.Year, now.Month, now.Day + 1, 1, 0, 0);//当天和第二天中间的凌晨1点开始运行
+                    task.FinishDate = now.AddDays(1);//24小时候该任务结束
+                    task.DisableReason = "";
+                    task.DBID = dbid;
+                    dbcontext.Entry<SchedulerTask>(task).State = System.Data.Entity.EntityState.Modified;
+                }
+                else
+                {
+                    string description = $"用户[{username}]发起备份数据库【{db.Name}】请求";
+                    string taskName = "备份数据库zip包,编号【" + db.DBCode + "】";
+                    task = new SchedulerTask()
+                    {
+                        Name = taskName,
+                        HandlerName = "BackDB",
+                        Description = description,
+                        Scheduler = "freq=daily;interval=1;runtime=01:00",
+                        IsRunning = false,
+                        IsDisabled = false,
+                        StartDate = now,           //从现在起
+                        DBID = dbid,
+                        LastRunning = null,
+                        NextRunning = new DateTime(now.Year, now.Month, now.Day + 1, 1, 0, 0),//当天和第二天中间的凌晨1点开始运行
+                        FinishDate = now.AddDays(1),//24小时候该任务结束
+                        DisableReason = "",
+                    };
+                    dbcontext.SchedulerTasks.Add(task);
+                }
+                dbcontext.SaveChanges();
+                return ApiResult.NewSuccessJson(new
+                {
+                    TaskName = task.Name,
+                    NextRunning= task.NextRunning.Value.ToString("yyyy-MM-dd HH:mm:ss"),
+                });
+            }
+            else
+            {
+                return ApiResult.NewErrorJson("该库不存在");
+            }
+        }
+
+        EKUDbcontext dbcontext = new EKUDbcontext();
+        public ApiResult add(SchedulerData schdata)
+        {
+            try
+            {
+                if (schdata == null)
+                {
+                    return ApiResult.NewErrorJson("参数为空");
+                }
+
+                string schedulerValue = schdata.SchedulerValue;
+                string schedulerType = schdata.SchedulerType;
+                string runtime = schdata.RunTime;
+
+                SchedulerTask task = new SchedulerTask();
+                task.Name = schdata.Name;
+                task.HandlerName = schdata.HandlerName;
+                task.Description = schdata.Description;
+
+                Scheduler scheduler = new Scheduler();
+                if (!String.IsNullOrEmpty(schedulerType) && !String.IsNullOrEmpty(schedulerValue))
+                {
+                    scheduler.SchedulerType = (SchedulerCodeType)Enum.Parse(typeof(SchedulerCodeType), schedulerType);
+                    switch (schedulerType)
+                    {
+                        case "ByMonth":
+                            scheduler.ByMonth = schedulerValue;
+                            break;
+                        case "ByDays":
+                            scheduler.ByDays = schedulerValue.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+                            scheduler.RunTime = runtime;
+                            break;
+                        case "ByDay":
+                            scheduler.ByDay = schedulerValue;
+                            scheduler.RunTime = runtime;
+                            break;
+                        case "ByHour":
+                            scheduler.ByHour = schedulerValue;
+                            break;
+                        case "ByMinute":
+                            scheduler.ByMinute = schedulerValue;
+                            break;
+                    }
+                }
+                task.Scheduler = scheduler.ToString();
+
+                task.StartDate = schdata.StartDate;
+                task.FinishDate = schdata.FinishDate;
+
+                task.NextRunning = scheduler.NextRunTime();
+                task.LastRunning = null;
+                task.IsDisabled = false;
+                task.IsRunning = false;
+
+                dbcontext.SchedulerTasks.Add(task);
+                dbcontext.SaveChanges();
+
+                return ApiResult.NewSuccessJson("添加成功");
+            }
+            catch (Exception ex)
+            {
+                return ApiResult.NewErrorJson(ex.Message.ToString());
+            }
+        }
+        public ApiResult GetLogListByTaskID(int taskid, int pageindex, int pagesize, string keyword)
+        {
+            var data = dbcontext.SchedulerTaskLogs.Where(t => t.TaskID == taskid);
+            if (!string.IsNullOrEmpty(keyword))
+            {
+                data = data.Where(t => t.Message.Contains(keyword));
+            }
+            List<SchedulerTaskLog> list = data.OrderByDescending(t => t.CreateTime).Skip((pageindex - 1) * pagesize).Take(pagesize).ToList();
+            int total = data.Count();
+            return ApiResult.NewSuccessJson(new
+            {
+                total = total,
+                rows = list,
+            });
+        }
+        public ApiResult list(SchedulerStatusEnums taskStatus = SchedulerStatusEnums.All)
+        {
+            try
+            {
+                List<SchedulerTask> tasks = dbcontext.SchedulerTasks.OrderBy(t => t.NextRunning).ToList();
+
+                if (taskStatus == SchedulerStatusEnums.Enabled)
+                {
+                    tasks = tasks.Where(t => t.IsDisabled == false).ToList();
+                }
+                else if (taskStatus == SchedulerStatusEnums.Disabled)
+                {
+                    tasks = tasks.Where(t => t.IsDisabled == true).ToList();
+                }
+
+                if (tasks != null && tasks.Count > 0)
+                {
+                    foreach (SchedulerTask item in tasks)
+                    {
+                        string schedulerFreq = "开始运行时间：" + item.StartDate.Value.ToString("yyyy-MM-dd HH:mm:ss");
+
+                        Scheduler scheduler = new Scheduler(item.Scheduler, item.NextRunning.Value);
+
+                        if (scheduler.SchedulerType == SchedulerCodeType.ByMonth)
+                        {
+                            schedulerFreq += string.Format(" 每{0}个月运行一次", scheduler.ByMonth);
+                        }
+                        //每周几运行
+                        else if (scheduler.SchedulerType == SchedulerCodeType.ByDays)
+                        {
+                            schedulerFreq += string.Format(" 每{0}在{1}运行一次", String.Join(", ", @scheduler.ByDays), scheduler.RunTime);
+                        }
+                        else if (scheduler.SchedulerType == SchedulerCodeType.ByDay)
+                        {
+                            if (scheduler.ByDay == "1")
+                            {
+                                schedulerFreq += string.Format(" 每天在{0}运行一次", scheduler.ByDay);
+                            }
+                            else
+                            {
+                                schedulerFreq += string.Format(" 每{0}天在{1}运行一次", scheduler.ByDay, scheduler.RunTime);
+                            }
+                        }
+                        else if (scheduler.SchedulerType == SchedulerCodeType.ByHour)
+                        {
+                            schedulerFreq += string.Format(" 每{0}小时运行一次", scheduler.ByHour);
+                        }
+                        else if (scheduler.SchedulerType == SchedulerCodeType.ByMinute)
+                        {
+                            schedulerFreq += string.Format(" 每{0}分钟运行一次", scheduler.ByMinute);
+                        }
+
+                        item.Scheduler = schedulerFreq;
+                    }
+                }
+
+                return ApiResult.NewSuccessJson(tasks);
+            }
+            catch (Exception ex)
+            {
+                return ApiResult.NewErrorJson(ex.Message.ToString());
+            }
+
+
+        }
+
+
+        public ApiResult edit(SchedulerData schdata)
+        {
+            try
+            {
+                if (schdata == null)
+                {
+                    return ApiResult.NewErrorJson("参数为空");
+                }
+
+                SchedulerTask task = dbcontext.SchedulerTasks.FirstOrDefault(t => t.ID == schdata.ID);
+                if (task == null)
+                {
+                    return ApiResult.NewErrorJson("ID错误或者此任务不存在");
+                }
+
+                string schedulerValue = schdata.SchedulerValue;
+                string schedulerType = schdata.SchedulerType;
+                string runtime = schdata.RunTime;
+
+
+                task.Name = schdata.Name;
+                //修改任务时不可修改处理程序
+                // task.HandlerName = schdata.HandlerName;
+                task.Description = schdata.Description;
+
+                Scheduler scheduler = new Scheduler();
+                if (!String.IsNullOrEmpty(schedulerType) && !String.IsNullOrEmpty(schedulerValue))
+                {
+                    scheduler.SchedulerType = (SchedulerCodeType)Enum.Parse(typeof(SchedulerCodeType), schedulerType);
+                    switch (schedulerType)
+                    {
+                        case "ByMonth":
+                            scheduler.ByMonth = schedulerValue;
+                            break;
+                        case "ByDays":
+                            scheduler.ByDays = schedulerValue.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+                            scheduler.RunTime = runtime;
+                            break;
+                        case "ByDay":
+                            scheduler.ByDay = schedulerValue;
+                            scheduler.RunTime = runtime;
+                            break;
+                        case "ByHour":
+                            scheduler.ByHour = schedulerValue;
+                            break;
+                        case "ByMinute":
+                            scheduler.ByMinute = schedulerValue;
+                            break;
+                    }
+                }
+                task.Scheduler = scheduler.ToString();
+
+                task.StartDate = schdata.StartDate;
+                task.FinishDate = schdata.FinishDate;
+
+                task.NextRunning = scheduler.NextRunTime();
+                task.LastRunning = null;
+                task.IsDisabled = false;
+                task.IsRunning = false;
+
+                dbcontext.Entry<SchedulerTask>(task).State = System.Data.Entity.EntityState.Modified;
+                dbcontext.SaveChanges();
+
+                return ApiResult.NewSuccessJson("修改成功");
+            }
+            catch (Exception ex)
+            {
+                return ApiResult.NewErrorJson(ex.Message.ToString());
+            }
+        }
+
+
+        public ApiResult getActions()
+        {
+            try
+            {
+                //List<KeyValuePair<string, bool>> HandlerMapping = new List<KeyValuePair<string, bool>>();
+
+                List<object> records = new List<object>();
+
+                //Assembly assembly = Assembly.LoadFrom(System.Web.HttpContext.Current.Server.MapPath("~/bin/EKULibrary.dll"));
+                Assembly assembly = Assembly.LoadFrom( System.Configuration.ConfigurationManager.AppSettings["EKULibraryPath"]);
+                if (assembly != null)
+                {
+                    Type[] types = assembly.GetTypes();
+                    foreach (Type t in types)
+                    {
+                        if (t.IsAbstract || t.IsNested)
+                        {
+                            continue;
+                        }
+                        else
+                        {
+                            if (t.FullName.StartsWith("EKULibrary.Action"))
+                            {
+                                Object instance = Activator.CreateInstance(t);
+                                PropertyInfo pi = t.GetProperty("Enabled");
+                                bool enabled = Convert.ToBoolean(pi.GetValue(instance, null));
+
+
+                                var obj = Newtonsoft.Json.JsonConvert.DeserializeObject<Dictionary<string, object>>(Newtonsoft.Json.JsonConvert.SerializeObject(instance));
+                                string description = obj["Description"].ToString();
+                                records.Add(new
+                                {
+                                    Key = t.Name,
+                                    Value = enabled,
+                                    Description = description
+                                });
+                            }
+                        }
+                    }
+                    assembly = null;
+                }
+
+
+                return ApiResult.NewSuccessJson(records);
+            }
+            catch (Exception ex)
+            {
+                return ApiResult.NewErrorJson(ex.Message.ToString());
+            }
+        }
+
+        public ApiResult getbyId(int ID)
+        {
+            try
+            {
+                if (ID == 0)
+                {
+                    return ApiResult.NewErrorJson("ID为空");
+                }
+
+
+                SchedulerTask task = dbcontext.SchedulerTasks.FirstOrDefault(t => t.ID == ID);
+                if (task == null)
+                {
+                    return ApiResult.NewErrorJson("ID为错误或者不存在");
+                }
+
+                SchedulerData data = new SchedulerData();
+
+                Scheduler scheduler = new Scheduler(task.Scheduler);
+
+                data.SchedulerType = scheduler.SchedulerType.ToString();
+
+                string schedulerValue = "";
+
+                switch (data.SchedulerType)
+                {
+                    case "ByMonth":
+                        schedulerValue = scheduler.ByMonth;
+                        break;
+                    case "ByDays":
+
+                        if (scheduler.ByDays.Length > 0)
+                        {
+                            foreach (string d in scheduler.ByDays)
+                            {
+                                schedulerValue += d + ",";
+                            }
+                            if (schedulerValue.Length > 0)
+                            {
+                                schedulerValue = schedulerValue.Substring(0, schedulerValue.Length - 1);
+                            }
+                        }
+                        data.RunTime = scheduler.RunTime;
+                        break;
+                    case "ByDay":
+                        schedulerValue = scheduler.ByDay;
+                        data.RunTime = scheduler.RunTime;
+                        break;
+                    case "ByHour":
+                        schedulerValue = scheduler.ByHour;
+                        break;
+                    case "ByMinute":
+                        schedulerValue = scheduler.ByMinute;
+                        break;
+                }
+                data.SchedulerValue = schedulerValue;
+                data.Name = task.Name;
+                data.Description = task.Description;
+                data.StartDate = Convert.ToDateTime(task.StartDate);
+                data.FinishDate = task.FinishDate;
+                data.HandlerName = task.HandlerName;
+                return ApiResult.NewSuccessJson(data);
+            }
+            catch (Exception ex)
+            {
+                return ApiResult.NewErrorJson(ex.Message.ToString());
+            }
+        }
+        public ApiResult DeleteLogByTaskID(int id)
+        {
+            SchedulerTaskLog log = dbcontext.SchedulerTaskLogs.FirstOrDefault(t => t.ID == id);
+            if (log != null)
+            {
+                dbcontext.SchedulerTaskLogs.Remove(log);
+                dbcontext.SaveChanges();
+            }
+            return ApiResult.NewSuccessJson("删除成功");
+        }
+        public ApiResult changeTask(ChangeStatus data)
+        {
+            try
+            {
+                if (data == null)
+                {
+                    return ApiResult.NewErrorJson("参数为空");
+                }
+
+                SchedulerTask task = dbcontext.SchedulerTasks.FirstOrDefault(t => t.ID == data.ID);
+                if (task == null)
+                {
+                    return ApiResult.NewErrorJson("ID错误或者此任务不存在");
+                }
+
+                if (data.IsDisabled == false)
+                {
+                    task.DisableReason = "";
+                }
+                else
+                {
+                    task.DisableReason = data.DisabledReason;
+                }
+
+                task.IsDisabled = data.IsDisabled;
+                dbcontext.Entry<SchedulerTask>(task).State = System.Data.Entity.EntityState.Modified;
+                dbcontext.SaveChanges();
+
+
+                return ApiResult.NewSuccessJson("修改成功");
+            }
+            catch (Exception ex)
+            {
+                return ApiResult.NewErrorJson(ex.Message.ToString());
+            }
+        }
+        public ApiResult SetTaskRunNow(List<int> ids)
+        {
+            foreach(int id in ids)
+            {
+                SchedulerTask task = dbcontext.SchedulerTasks.FirstOrDefault(t => t.ID == id);
+                if (task != null)
+                {
+                    task.NextRunning = DateTime.Now;
+                    dbcontext.Entry<SchedulerTask>(task).State = System.Data.Entity.EntityState.Modified;
+                    dbcontext.SaveChanges();
+                } 
+            }
+            return ApiResult.NewSuccessJson("修改成功");
+        }
+    }
+    public class SchedulerData
+    {
+        public int ID { get; set; }
+        public string Name { get; set; }
+        public string Description { get; set; }
+        /// <summary>
+        /// 定时类型
+        /// </summary>
+        public string SchedulerType { get; set; }
+        /// <summary>
+        /// 定时value
+        /// </summary>
+        public string SchedulerValue { get; set; }
+        /// <summary>
+        /// 运行时间
+        /// </summary>
+        public string RunTime { get; set; }
+        public DateTime StartDate { get; set; }
+        public string HandlerName { get; set; }
+        public Nullable<DateTime> FinishDate { get; set; }
+    }
+
+    public enum SchedulerStatusEnums
+    {
+        All = 0,
+        /// <summary>
+        /// 在任务中运行
+        /// </summary>
+        Enabled = 1,
+        /// <summary>
+        /// 不运行的
+        /// </summary>
+        Disabled = 2,
+    }
+
+    public class ChangeStatus
+    {
+        public int ID { get; set; }
+        public bool IsDisabled { get; set; }
+        public string DisabledReason { get; set; }
+    }
+}
